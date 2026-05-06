@@ -91,7 +91,7 @@ func (t *Transport) resolveClient() *http.Client {
 		return &client
 	}
 
-	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr := cloneTransport(http.DefaultTransport.(*http.Transport))
 
 	if t.opts.HTTPProxy != nil {
 		tr.Proxy = t.opts.HTTPProxy
