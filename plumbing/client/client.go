@@ -86,7 +86,7 @@ func WithHTTPAuth(a HTTPAuth) Option {
 // golang.org/x/net/proxy.FromURL to wrap the underlying dialer.
 func WithProxyURL(u *url.URL) Option {
 	return func(o *options) {
-		o.http.HTTPProxy = http.ProxyURL(u)
+		o.http.HTTPProxy = httpProxyURL(u)
 
 		wrap := proxyDialer(func(forward proxy.Dialer) (proxy.Dialer, error) {
 			return proxy.FromURL(u, forward)
@@ -102,7 +102,7 @@ func WithProxyURL(u *url.URL) Option {
 // this uses golang.org/x/net/proxy.FromEnvironmentUsing.
 func WithProxyEnvironment() Option {
 	return func(o *options) {
-		o.http.HTTPProxy = http.ProxyFromEnvironment
+		o.http.HTTPProxy = httpProxyFromEnvironment()
 
 		wrap := proxyDialer(func(forward proxy.Dialer) (proxy.Dialer, error) {
 			return proxy.FromEnvironmentUsing(forward), nil
