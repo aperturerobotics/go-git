@@ -1,4 +1,4 @@
-//go:build js && !tinygo
+//go:build js && tinygo
 
 package git
 
@@ -12,7 +12,7 @@ import (
 func init() {
 	fillSystemInfo = func(e *index.Entry, sys any) {
 		if os, ok := sys.(*syscall.Stat_t); ok {
-			e.CreatedAt = time.Unix(int64(os.Ctime), int64(os.CtimeNsec))
+			e.CreatedAt = time.Unix(0, 0)
 			e.Dev = uint32(os.Dev)
 			e.Inode = uint32(os.Ino)
 			e.GID = os.Gid
