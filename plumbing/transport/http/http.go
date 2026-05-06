@@ -93,13 +93,7 @@ func (t *Transport) resolveClient() *http.Client {
 
 	tr := cloneTransport(http.DefaultTransport.(*http.Transport))
 
-	if t.opts.HTTPProxy != nil {
-		tr.Proxy = t.opts.HTTPProxy
-	}
-
-	if t.opts.TLS != nil {
-		tr.TLSClientConfig = t.opts.TLS
-	}
+	configureTransport(tr, t.opts)
 
 	return &http.Client{
 		Transport:     tr,
