@@ -8,3 +8,5 @@ func cloneTransport(tr *nethttp.Transport) *nethttp.Transport {
 	cloned := *tr
 	return &cloned
 }
+
+func configureTransport(*nethttp.Transport, Options) {}
