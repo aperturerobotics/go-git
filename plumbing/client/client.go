@@ -1,3 +1,5 @@
+//go:build !goscript
+
 // Package client provides a convenience Client that resolves URL schemes
 // to transport implementations and provides Handshake/Connect methods.
 package client
