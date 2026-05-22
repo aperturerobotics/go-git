@@ -1,3 +1,5 @@
+//go:build !goscript
+
 // Package ssh implements the SSH transport for the new transport API.
 package ssh
 
