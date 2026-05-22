@@ -2,12 +2,16 @@
 
 package ssh
 
-import "errors"
+import (
+	"errors"
+
+	gossh "golang.org/x/crypto/ssh"
+)
 
 // PublicKeys implements SSH public key authentication using the given key pair.
 type PublicKeys struct {
 	User   string
-	Signer any
+	Signer gossh.Signer
 }
 
 // ErrUnsupportedAuth is returned when SSH auth helpers are used in a GoScript
