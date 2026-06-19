@@ -2,8 +2,6 @@ package config
 
 import (
 	"io"
-
-	"github.com/go-git/gcfg/v2"
 )
 
 // A Decoder reads and decodes config files from an input stream.
@@ -33,5 +31,5 @@ func (d *Decoder) Decode(config *Config) error {
 		config.AddOption(s, ss, k, v)
 		return nil
 	}
-	return gcfg.ReadWithCallback(d, cb)
+	return readConfigWithCallback(d, cb)
 }

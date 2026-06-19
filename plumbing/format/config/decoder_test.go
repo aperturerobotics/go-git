@@ -91,8 +91,17 @@ func (s *DecoderSuite) TestDecodeFailsWithGarbage() {
 	decodeFails(s, `[section]key=value"`)
 }
 
+func (s *DecoderSuite) TestDecodeFailsWithInvalidBytes() {
+	decodeBytesFail(s, []byte("[section]\nkey=va\x00lue\n"))
+	decodeBytesFail(s, []byte("[section]\nkey=va\xfflue\n"))
+}
+
 func decodeFails(s *DecoderSuite, text string) {
-	r := bytes.NewReader([]byte(text))
+	decodeBytesFail(s, []byte(text))
+}
+
+func decodeBytesFail(s *DecoderSuite, text []byte) {
+	r := bytes.NewReader(text)
 	d := NewDecoder(r)
 	cfg := &Config{}
 	err := d.Decode(cfg)
@@ -110,6 +119,36 @@ func decodeSucceeds(s *DecoderSuite, text string) {
 	remote := cfg.Section("remote")
 	s.True(remote.HasOption("key"))
 	s.Equal("value", remote.Option("key"))
+}
+
+func (s *DecoderSuite) TestDecodeScannerSyntax() {
+	text := `[section]
+	valueless
+	continued = first\
+second
+	backspace = a\bz
+	quoted-whitespace = "  kept  "
+	inline-comment = value ; ignored
+	quoted-comment = "value ; kept # kept"
+[section "sub\"\\section"]
+	key = value
+`
+
+	d := NewDecoder(bytes.NewReader([]byte(text)))
+	cfg := &Config{}
+	s.NoError(d.Decode(cfg))
+
+	section := cfg.Section("section")
+	s.True(section.HasOption("valueless"))
+	s.Equal("", section.Option("valueless"))
+	s.Equal("firstsecond", section.Option("continued"))
+	s.Equal("a\bz", section.Option("backspace"))
+	s.Equal("  kept  ", section.Option("quoted-whitespace"))
+	s.Equal("value", section.Option("inline-comment"))
+	s.Equal("value ; kept # kept", section.Option("quoted-comment"))
+
+	subsection := section.Subsection(`sub"\section`)
+	s.Equal("value", subsection.Option("key"))
 }
 
 func FuzzDecoder(f *testing.F) {
