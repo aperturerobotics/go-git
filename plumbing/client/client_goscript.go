@@ -11,7 +11,6 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/transport"
 	"github.com/go-git/go-git/v6/plumbing/transport/file"
 	xgit "github.com/go-git/go-git/v6/plumbing/transport/git"
-	xssh "github.com/go-git/go-git/v6/plumbing/transport/ssh"
 )
 
 // SSHAuth is implemented by SSH authentication types whose ClientConfig
@@ -22,24 +21,24 @@ type SSHAuth interface{}
 type Option func(*options)
 
 type options struct {
-	ssh  xssh.Options
 	git  xgit.Options
 	file file.Options
 
 	schemes map[string]transport.Transport
 }
 
-// WithSSHAuth sets SSH authentication. The auth type's ClientConfig method
-// is called for each SSH connection.
+// WithSSHAuth accepts SSH authentication for API parity with the native
+// client. The GoScript build omits the ssh transport to keep reflect (pulled
+// by golang.org/x/crypto/ssh) out of the browser dependency graph, so the
+// browser never serves ssh:// URLs and this option has no effect.
 func WithSSHAuth(a SSHAuth) Option {
 	return func(o *options) {
 	}
 }
 
-// WithDialer sets a custom dialer for SSH and Git TCP transports.
+// WithDialer sets a custom dialer for the Git TCP transport.
 func WithDialer(fn transport.DialContextFunc) Option {
 	return func(o *options) {
-		o.ssh.DialContext = fn
 		o.git.DialContext = fn
 	}
 }
@@ -131,8 +130,6 @@ func (c *Client) builtin(scheme string) (transport.Transport, error) {
 		return file.NewTransport(c.opts.file), nil
 	case "git":
 		return xgit.NewTransport(c.opts.git), nil
-	case "ssh":
-		return xssh.NewTransport(c.opts.ssh), nil
 	default:
 		return nil, fmt.Errorf("transport: unsupported scheme %q", scheme)
 	}
