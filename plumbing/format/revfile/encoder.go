@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"hash"
 	"io"
-	"reflect"
 
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/format/idxfile"
@@ -30,15 +29,8 @@ type stateFnEncode func(*encoder) (stateFnEncode, error)
 // The reverse index maps pack offsets (sorted order) to index positions.
 // This function is safe to call concurrently with different parameters.
 func Encode(w io.Writer, h hash.Hash, idx *idxfile.MemoryIndex) error {
-	if w == nil {
+	if isNilWriter(w) {
 		return fmt.Errorf("nil writer")
-	}
-	v := reflect.ValueOf(w)
-	switch v.Kind() {
-	case reflect.Pointer, reflect.Interface:
-		if v.IsNil() {
-			return fmt.Errorf("nil writer")
-		}
 	}
 
 	if idx == nil {
