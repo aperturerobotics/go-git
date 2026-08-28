@@ -39,9 +39,9 @@ type Options struct {
 	// LargeObjectThreshold maximum object size (in bytes) that will be read in to memory.
 	// If left unset or set to 0 there is no limit
 	LargeObjectThreshold int64
-	// AlternatesFS provides the billy filesystem to be used for Git Alternates.
-	// If none is provided, it falls back to using the underlying instance used for
-	// DotGit.
+	// AlternatesFS provides the filesystem root used to resolve Git alternate
+	// paths. Relative entries are interpreted from the object database before
+	// lookup. If none is provided, lookup falls back to the DotGit filesystem.
 	AlternatesFS billy.Filesystem
 	// HighMemoryMode defines whether the storage will operate in high-memory
 	// mode. This defaults to false. For more information refer to packfile's Parser

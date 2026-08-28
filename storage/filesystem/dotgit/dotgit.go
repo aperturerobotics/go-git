@@ -91,9 +91,9 @@ type Options struct {
 	// ExclusiveAccess means that the filesystem is not modified externally
 	// while the repo is open.
 	ExclusiveAccess bool
-	// AlternatesFS provides the billy filesystem to be used for Git Alternates.
-	// If none is provided, it falls back to using the underlying instance used for
-	// DotGit.
+	// AlternatesFS provides the filesystem root used to resolve Git alternate
+	// paths. Relative entries are interpreted from the object database before
+	// lookup. If none is provided, lookup falls back to the DotGit filesystem.
 	AlternatesFS billy.Filesystem
 
 	ObjectFormat formatcfg.ObjectFormat
@@ -1434,14 +1434,35 @@ func (d *DotGit) Alternates() ([]*DotGit, error) {
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
 		path := scanner.Text()
-		if filepath.IsAbs(path) || filepath.VolumeName(path) != "" {
+		absolute := filepath.IsAbs(path) || filepath.VolumeName(path) != ""
+
+		switch {
+		case absolute:
 			path = filepath.Clean(path)
-		} else {
+			pathVolume := filepath.VolumeName(path)
+			filesystemVolume := filepath.VolumeName(fs.Root())
+			if pathVolume != "" && filesystemVolume != "" &&
+				!strings.EqualFold(pathVolume, filesystemVolume) {
+				return nil, fmt.Errorf(
+					"alternate object directory volume %q is outside filesystem volume %q",
+					pathVolume,
+					filesystemVolume,
+				)
+			}
+		case d.options.AlternatesFS != nil:
+			// Git resolves relative entries from the object database, not from
+			// the directory containing the alternates file.
+			objectsFS, err := d.fs.Chroot(objectsPath)
+			if err != nil {
+				return nil, fmt.Errorf("cannot resolve object database: %w", err)
+			}
+			path = filepath.Clean(filepath.Join(objectsFS.Root(), path))
+		default:
 			// By Git conventions, relative paths should be based on the object database (.git/objects/info)
 			// location as per: https://www.kernel.org/pub/software/scm/git/docs/gitrepository-layout.html
 			// However, due to the nature of go-git and its filesystem handling via Billy, paths cannot
 			// cross its "chroot boundaries". Therefore, ignore any "../" and treat the path from the
-			// fs root. If this is not correct based on the dotgit fs, set a different one via AlternatesFS.
+			// repository fs root.
 			abs := filepath.Join(string(filepath.Separator), filepath.ToSlash(path))
 			path = filepath.FromSlash(abs)
 		}

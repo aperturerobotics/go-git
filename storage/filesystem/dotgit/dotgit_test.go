@@ -1026,6 +1026,12 @@ func TestAlternatesWithBoundOS(t *testing.T) {
 }
 
 func testAlternates(t *testing.T, dotFS, altFS billy.Filesystem) {
+	relativeAlternate, err := filepath.Rel(
+		filepath.Join(dotFS.Root(), "objects"),
+		filepath.Join(altFS.Root(), "repo3", ".git", "objects"),
+	)
+	require.NoError(t, err)
+
 	tests := []struct {
 		name      string
 		in        []string
@@ -1049,8 +1055,8 @@ func testAlternates(t *testing.T, dotFS, altFS billy.Filesystem) {
 		},
 		{
 			name:      "rel path",
-			in:        []string{"../../../repo3//.git/objects"},
-			inWindows: []string{"..\\..\\..\\repo3\\.git\\objects"},
+			in:        []string{relativeAlternate},
+			inWindows: []string{relativeAlternate},
 			setup: func() {
 				err := altFS.MkdirAll(filepath.Join("repo3", ".git", "objects"), 0o700)
 				assert.NoError(t, err)
@@ -1170,6 +1176,34 @@ func TestAlternatesAbsolutePathOutsideAlternatesFSRoot(t *testing.T) {
 	assert.ErrorIs(t, err, os.ErrNotExist)
 }
 
+func TestAlternatesRejectDifferentWindowsVolume(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows volume semantics")
+	}
+
+	base := t.TempDir()
+	dotFS := osfs.New(filepath.Join(base, "repository"))
+	dir := NewWithOptions(dotFS, Options{
+		AlternatesFS: osfs.New(base, osfs.WithBoundOS()),
+	})
+	require.NoError(t, dir.Initialize())
+
+	otherVolume := "Z:"
+	if strings.EqualFold(filepath.VolumeName(base), otherVolume) {
+		otherVolume = "Y:"
+	}
+	alternatesPath := dotFS.Join("objects", "info", "alternates")
+	alternates, err := dotFS.Create(alternatesPath)
+	require.NoError(t, err)
+	_, err = fmt.Fprintln(alternates, filepath.Join(otherVolume+string(filepath.Separator), "objects"))
+	require.NoError(t, err)
+	require.NoError(t, alternates.Close())
+
+	_, err = dir.Alternates()
+	require.ErrorContains(t, err, "is outside filesystem volume")
+}
+
 func TestAlternatesDefaultAbsolutePathOutsideDotGitRoot(t *testing.T) {
 	t.Parallel()
 
@@ -1196,6 +1230,101 @@ func TestAlternatesDefaultAbsolutePathOutsideDotGitRoot(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, dotgits, 1)
 	assert.Equal(t, alternateRoot, dotgits[0].fs.Root())
+}
+
+func TestAlternatesRouteRelativeAndAbsoluteEntriesPerEntry(t *testing.T) {
+	t.Parallel()
+
+	base := t.TempDir()
+	dotRoot := filepath.Join(base, "repository", ".git")
+	relativeRoot := filepath.Join(base, "relative")
+	absoluteRoot := filepath.Join(base, "external")
+	require.NoError(t, os.MkdirAll(dotRoot, 0o700))
+
+	relative := New(osfs.New(relativeRoot))
+	require.NoError(t, relative.Initialize())
+	relativeHash := writeAlternateTestBlob(t, relative, "relative")
+
+	absolute := New(osfs.New(absoluteRoot))
+	require.NoError(t, absolute.Initialize())
+	absoluteHash := writeAlternateTestBlob(t, absolute, "absolute")
+
+	dotFS := osfs.New(dotRoot)
+	dir := NewWithOptions(dotFS, Options{
+		AlternatesFS: osfs.New(base, osfs.WithBoundOS()),
+	})
+	require.NoError(t, dir.Initialize())
+
+	alternatesPath := dotFS.Join("objects", "info", "alternates")
+	alternates, err := dotFS.Create(alternatesPath)
+	require.NoError(t, err)
+	_, err = fmt.Fprintf(alternates, "../../../relative/objects\n%s\n", filepath.Join(absoluteRoot, "objects"))
+	require.NoError(t, err)
+	require.NoError(t, alternates.Close())
+
+	dotgits, err := dir.Alternates()
+	require.NoError(t, err)
+	require.Len(t, dotgits, 2)
+
+	relativeObject, err := dotgits[0].Object(relativeHash)
+	require.NoError(t, err)
+	require.NoError(t, relativeObject.Close())
+
+	absoluteObject, err := dotgits[1].Object(absoluteHash)
+	require.NoError(t, err)
+	require.NoError(t, absoluteObject.Close())
+}
+
+func TestAlternatesResolveRelativeEntryFromCommonObjectDatabase(t *testing.T) {
+	t.Parallel()
+
+	base := t.TempDir()
+	commonRoot := filepath.Join(base, "main", ".git")
+	privateRoot := filepath.Join(commonRoot, "worktrees", "linked")
+	alternateRoot := filepath.Join(base, "alternate")
+	require.NoError(t, os.MkdirAll(privateRoot, 0o700))
+
+	alternate := New(osfs.New(alternateRoot))
+	require.NoError(t, alternate.Initialize())
+	alternateHash := writeAlternateTestBlob(t, alternate, "linked worktree")
+
+	repositoryFS := NewRepositoryFilesystem(osfs.New(privateRoot), osfs.New(commonRoot))
+	dir := NewWithOptions(repositoryFS, Options{
+		AlternatesFS: osfs.New(base, osfs.WithBoundOS()),
+	})
+	require.NoError(t, dir.Initialize())
+
+	relativeAlternate, err := filepath.Rel(
+		filepath.Join(commonRoot, "objects"),
+		filepath.Join(alternateRoot, "objects"),
+	)
+	require.NoError(t, err)
+	alternatesPath := repositoryFS.Join("objects", "info", "alternates")
+	alternates, err := repositoryFS.Create(alternatesPath)
+	require.NoError(t, err)
+	_, err = fmt.Fprintln(alternates, relativeAlternate)
+	require.NoError(t, err)
+	require.NoError(t, alternates.Close())
+
+	dotgits, err := dir.Alternates()
+	require.NoError(t, err)
+	require.Len(t, dotgits, 1)
+
+	object, err := dotgits[0].Object(alternateHash)
+	require.NoError(t, err)
+	require.NoError(t, object.Close())
+}
+
+func writeAlternateTestBlob(t *testing.T, dotgit *DotGit, contents string) plumbing.Hash {
+	t.Helper()
+
+	object, err := dotgit.NewObject()
+	require.NoError(t, err)
+	require.NoError(t, object.WriteHeader(plumbing.BlobObject, int64(len(contents))))
+	_, err = object.Write([]byte(contents))
+	require.NoError(t, err)
+	require.NoError(t, object.Close())
+	return object.Hash()
 }
 
 type norwfs struct {
