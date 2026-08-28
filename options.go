@@ -828,8 +828,8 @@ type PlainOpenOptions struct {
 	// walked until a .git directory or file is found.
 	DetectDotGit bool
 	// AlternatesFS provides the billy filesystem to be used for Git Alternates.
-	// If none is provided, it falls back to the repository's .git directory
-	// filesystem.
+	// If none is provided, PlainOpen uses the host filesystem so absolute
+	// alternate object paths resolve outside the repository.
 	AlternatesFS billy.Filesystem
 }
 

@@ -450,9 +450,20 @@ func PlainOpenWithOptions(path string, o *PlainOpenOptions) (*Repository, error)
 	}
 	repositoryFs = dotgit.NewRepositoryFilesystem(dot, dotGitCommon)
 
-	s := filesystem.NewStorageWithOptions(repositoryFs, cache.NewObjectLRUDefault(), filesystem.Options{
-		AlternatesFS: o.AlternatesFS,
-	})
+	// Resolve absolute alternates against the host filesystem by default.
+	// An explicit filesystem keeps callers in control of alternate lookup.
+	alternatesFS := o.AlternatesFS
+	if alternatesFS == nil {
+		volumeRoot := filepath.VolumeName(dot.Root()) + string(filepath.Separator)
+		alternatesFS = osfs.New(volumeRoot, osfs.WithBoundOS())
+	}
+	s := filesystem.NewStorageWithOptions(
+		repositoryFs,
+		cache.NewObjectLRUDefault(),
+		filesystem.Options{
+			AlternatesFS: alternatesFS,
+		},
+	)
 
 	r, err := Open(s, wt)
 	if err != nil {
