@@ -450,7 +450,14 @@ func PlainOpenWithOptions(path string, o *PlainOpenOptions) (*Repository, error)
 	}
 	repositoryFs = dotgit.NewRepositoryFilesystem(dot, dotGitCommon)
 
-	s := filesystem.NewStorage(repositoryFs, cache.NewObjectLRUDefault())
+	volumeRoot := filepath.VolumeName(dot.Root()) + string(filepath.Separator)
+	s := filesystem.NewStorageWithOptions(
+		repositoryFs,
+		cache.NewObjectLRUDefault(),
+		filesystem.Options{
+			AlternatesFS: osfs.New(volumeRoot, osfs.WithBoundOS()),
+		},
+	)
 
 	r, err := Open(s, wt)
 	if err != nil {

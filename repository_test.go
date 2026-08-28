@@ -1467,6 +1467,74 @@ func (s *RepositorySuite) TestPlainOpenNotExistsDetectDotGit() {
 	s.Nil(r)
 }
 
+func TestPlainOpenAbsoluteExternalAlternate(t *testing.T) {
+	t.Parallel()
+
+	gitPath, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git executable is required")
+	}
+
+	forEachFormat(t, func(t *testing.T, objectFormat formatcfg.ObjectFormat) {
+		for _, isBare := range []bool{false, true} {
+			name := "worktree"
+			if isBare {
+				name = "bare"
+			}
+			t.Run(name, func(t *testing.T) {
+				base := t.TempDir()
+				repositoryPath := filepath.Join(base, "repository")
+				externalObjectsPath := filepath.Join(base, "external", "objects")
+				initialPath := repositoryPath
+				if isBare {
+					initialPath = filepath.Join(base, "initial")
+				}
+
+				repository, err := PlainInit(initialPath, false, WithObjectFormat(objectFormat))
+				require.NoError(t, err)
+				head := createCommit(t, repository)
+				require.NoError(t, repository.Close())
+
+				gitDirectory := filepath.Join(initialPath, GitDirName)
+				if isBare {
+					require.NoError(t, os.Rename(gitDirectory, repositoryPath))
+					gitDirectory = repositoryPath
+				}
+				repositoryObjectsPath := filepath.Join(gitDirectory, "objects")
+				require.NoError(t, os.MkdirAll(filepath.Dir(externalObjectsPath), 0o755))
+				require.NoError(t, os.Rename(repositoryObjectsPath, externalObjectsPath))
+				require.NoError(t, os.MkdirAll(filepath.Join(repositoryObjectsPath, "info"), 0o755))
+				require.NoError(t, os.MkdirAll(filepath.Join(repositoryObjectsPath, "pack"), 0o755))
+				require.NoError(t, os.WriteFile(
+					filepath.Join(repositoryObjectsPath, "info", "alternates"),
+					[]byte(externalObjectsPath+"\n"),
+					0o644,
+				))
+
+				arguments := []string{"-C", repositoryPath, "cat-file", "-e", "HEAD"}
+				if isBare {
+					arguments = []string{"--git-dir", repositoryPath, "cat-file", "-e", "HEAD"}
+				}
+				command := exec.Command(gitPath, arguments...)
+				output, err := command.CombinedOutput()
+				require.NoError(t, err, "%s", output)
+
+				reopened, err := PlainOpen(repositoryPath)
+				require.NoError(t, err)
+				defer func() { require.NoError(t, reopened.Close()) }()
+
+				reference, err := reopened.Head()
+				require.NoError(t, err)
+				assert.Equal(t, head, reference.Hash())
+
+				object, err := reopened.Storer.EncodedObject(plumbing.CommitObject, head)
+				require.NoError(t, err)
+				assert.Equal(t, head, object.Hash())
+			})
+		}
+	})
+}
+
 func (s *RepositorySuite) TestPlainClone() {
 	dir := "rel-dir"
 	err := os.Mkdir(dir, 0o755)
