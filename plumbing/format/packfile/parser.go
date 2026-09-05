@@ -171,7 +171,8 @@ func (p *Parser) resetCache(qty int) {
 	}
 }
 
-// Parse start decoding phase of the packfile.
+// Parse validates the pack and reports objects while retaining each inflated
+// delta base only until its descendants have been resolved.
 func (p *Parser) Parse() (plumbing.Hash, error) {
 	p.m.Lock()
 	defer p.m.Unlock()
@@ -180,6 +181,14 @@ func (p *Parser) Parse() (plumbing.Hash, error) {
 		return plumbing.ZeroHash, ErrParserConsumed
 	}
 	p.parsed = true
+	defer func() {
+		for _, oh := range p.cache.oi {
+			if oh.content != nil {
+				sync.PutBytesBuffer(oh.content)
+				oh.content = nil
+			}
+		}
+	}()
 
 	var pendingDeltas []*ObjectHeader
 	var pendingDeltaREFs []*ObjectHeader
@@ -229,16 +238,6 @@ func (p *Parser) Parse() (plumbing.Hash, error) {
 	if err := p.resolveDeltas(pendingDeltas, pendingDeltaREFs); err != nil {
 		return plumbing.ZeroHash, err
 	}
-
-	// Return to pool all objects used.
-	go func() {
-		for _, oh := range p.cache.oi {
-			if oh.content != nil {
-				sync.PutBytesBuffer(oh.content)
-				oh.content = nil
-			}
-		}
-	}()
 
 	return p.checksum, p.onFooter(p.checksum)
 }
@@ -342,6 +341,11 @@ func (p *Parser) resolveDeltas(ofsDeltas, refDeltas []*ObjectHeader) error {
 			if err := visit(c); err != nil {
 				return err
 			}
+		}
+		// The depth-first walk has resolved every in-pack consumer of parent.
+		if parent.content != nil {
+			sync.PutBytesBuffer(parent.content)
+			parent.content = nil
 		}
 		return nil
 	}
