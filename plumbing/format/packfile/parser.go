@@ -156,14 +156,30 @@ func (p *Parser) resetCache(qty int) {
 	}
 }
 
-// Parse start decoding phase of the packfile.
+// Parse validates the pack and reports objects while retaining each inflated
+// delta base only until its last pending consumer has been resolved.
 func (p *Parser) Parse() (plumbing.Hash, error) {
+	// Keep parser state and buffer cleanup inside the same exclusive lifetime.
 	p.m.Lock()
 	defer p.m.Unlock()
 
+	// Return cached buffers before unlocking, including on malformed input.
+	defer func() {
+		for _, oh := range p.cache.oi {
+			if oh.content != nil {
+				sync.PutBytesBuffer(oh.content)
+				oh.content = nil
+			}
+		}
+	}()
+
+	// Count future delta consumers while scanning the complete pack.
+	byOffset := make(map[int64]int)
+	byHash := make(map[plumbing.Hash]int)
 	var pendingDeltas []*ObjectHeader
 	var pendingDeltaREFs []*ObjectHeader
 
+	// Collect encoded delta dependencies before resolving their contents.
 	for p.scanner.Scan() {
 		data := p.scanner.Data()
 		switch data.Section {
@@ -179,8 +195,10 @@ func (p *Parser) Parse() (plumbing.Hash, error) {
 				oh.Hash.ResetBySize(p.scanner.objectIDSize)
 				switch oh.Type {
 				case plumbing.OFSDeltaObject:
+					byOffset[oh.OffsetReference]++
 					pendingDeltas = append(pendingDeltas, &oh)
 				case plumbing.REFDeltaObject:
+					byHash[oh.Reference]++
 					pendingDeltaREFs = append(pendingDeltaREFs, &oh)
 				}
 				continue
@@ -198,6 +216,7 @@ func (p *Parser) Parse() (plumbing.Hash, error) {
 		}
 	}
 
+	// Reject incomplete input before processing any deferred delta.
 	err := p.scanner.Error()
 	if err != nil {
 		if errors.Is(err, io.EOF) && p.scanner.objects == 0 {
@@ -206,30 +225,42 @@ func (p *Parser) Parse() (plumbing.Hash, error) {
 		return plumbing.ZeroHash, err
 	}
 
-	for _, oh := range pendingDeltaREFs {
-		err := p.processDelta(oh)
-		if err != nil {
-			return plumbing.ZeroHash, fmt.Errorf("processing ref-delta at offset %v: %w", oh.Offset, err)
+	// Retain inflated bytes only while another pending delta needs them.
+	releaseUnused := func(oh *ObjectHeader) {
+		if oh.content != nil && byOffset[oh.Offset] == 0 && byHash[oh.Hash] == 0 {
+			sync.PutBytesBuffer(oh.content)
+			oh.content = nil
 		}
 	}
-
-	for _, oh := range pendingDeltas {
-		err := p.processDelta(oh)
-		if err != nil {
-			return plumbing.ZeroHash, fmt.Errorf("processing ofs-delta at offset %v: %w", oh.Offset, err)
-		}
+	for _, oh := range p.cache.oi {
+		releaseUnused(oh)
 	}
 
-	// Return to pool all objects used.
-	go func() {
-		for _, oh := range p.cache.oi {
-			if oh.content != nil {
-				sync.PutBytesBuffer(oh.content)
-				oh.content = nil
+	// Resolve reference deltas before offset deltas, preserving parse order.
+	for _, group := range [][]*ObjectHeader{pendingDeltaREFs, pendingDeltas} {
+		for _, oh := range group {
+			// Resolve this object while its parent is still retained.
+			if err := p.processDelta(oh); err != nil {
+				kind := "ofs-delta"
+				if oh.diskType == plumbing.REFDeltaObject {
+					kind = "ref-delta"
+				}
+				return plumbing.ZeroHash, fmt.Errorf("processing %s at offset %v: %w", kind, oh.Offset, err)
 			}
-		}
-	}()
 
+			// The parent has one fewer consumer after this delta is resolved.
+			switch oh.diskType {
+			case plumbing.REFDeltaObject:
+				byHash[oh.Reference]--
+			case plumbing.OFSDeltaObject:
+				byOffset[oh.OffsetReference]--
+			}
+			releaseUnused(oh.parent)
+			releaseUnused(oh)
+		}
+	}
+
+	// Publish the checksum after all object identities have been verified.
 	return p.checksum, p.onFooter(p.checksum)
 }
 
