@@ -306,12 +306,22 @@ func (p *Parser) resolveDeltas(ofsDeltas, refDeltas []*ObjectHeader) error {
 	// children under one parent (chains and wide trees), so a hint
 	// sized to len(deltas) consistently overshoots. Let the maps grow.
 	ofsChildren := map[int64][]*ObjectHeader{}
+	ofsRemaining := map[int64]int{}
 	for _, d := range ofsDeltas {
 		ofsChildren[d.OffsetReference] = append(ofsChildren[d.OffsetReference], d)
+		ofsRemaining[d.OffsetReference]++
 	}
 	refChildren := map[plumbing.Hash][]*ObjectHeader{}
+	refRemaining := map[plumbing.Hash]int{}
 	for _, d := range refDeltas {
 		refChildren[d.Reference] = append(refChildren[d.Reference], d)
+		refRemaining[d.Reference]++
+	}
+	releaseUnused := func(parent *ObjectHeader) {
+		if parent.content != nil && ofsRemaining[parent.Offset] == 0 && refRemaining[parent.Hash] == 0 {
+			sync.PutBytesBuffer(parent.content)
+			parent.content = nil
+		}
 	}
 
 	var visit func(*ObjectHeader) error
@@ -327,6 +337,8 @@ func (p *Parser) resolveDeltas(ofsDeltas, refDeltas []*ObjectHeader) error {
 			if err := p.processDelta(c); err != nil {
 				return fmt.Errorf("processing ref-delta at offset %v: %w", c.Offset, err)
 			}
+			refRemaining[c.Reference]--
+			releaseUnused(parent)
 			if err := visit(c); err != nil {
 				return err
 			}
@@ -338,15 +350,13 @@ func (p *Parser) resolveDeltas(ofsDeltas, refDeltas []*ObjectHeader) error {
 			if err := p.processDelta(c); err != nil {
 				return fmt.Errorf("processing ofs-delta at offset %v: %w", c.Offset, err)
 			}
+			ofsRemaining[c.OffsetReference]--
+			releaseUnused(parent)
 			if err := visit(c); err != nil {
 				return err
 			}
 		}
-		// The depth-first walk has resolved every in-pack consumer of parent.
-		if parent.content != nil {
-			sync.PutBytesBuffer(parent.content)
-			parent.content = nil
-		}
+		releaseUnused(parent)
 		return nil
 	}
 
@@ -373,6 +383,8 @@ func (p *Parser) resolveDeltas(ofsDeltas, refDeltas []*ObjectHeader) error {
 		if err := p.processDelta(d); err != nil {
 			return fmt.Errorf("processing ref-delta at offset %v: %w", d.Offset, err)
 		}
+		refRemaining[d.Reference]--
+		releaseUnused(d.parent)
 	}
 
 	for _, d := range ofsDeltas {

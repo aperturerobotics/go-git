@@ -1069,6 +1069,14 @@ func TestMerge(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "source URL rules replace the previous order",
+			input: []*Config{
+				{URLs: []*URL{{Name: "old"}}},
+				{URLs: []*URL{{Name: "first"}, {Name: "second"}}},
+			},
+			want: Config{URLs: []*URL{{Name: "first"}, {Name: "second"}}},
+		},
 	}
 
 	for _, tc := range tests {

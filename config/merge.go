@@ -58,7 +58,10 @@ func merge(dst, src *Config) {
 	mergeMap(&dst.Remotes, src.Remotes)
 	mergeMap(&dst.Submodules, src.Submodules)
 	mergeMap(&dst.Branches, src.Branches)
-	mergeMap(&dst.URLs, src.URLs)
+	// URL rules are ordered; a non-nil source replaces the previous order.
+	if src.URLs != nil {
+		dst.URLs = src.URLs
+	}
 }
 
 func mergeCore(dst, src *struct {
