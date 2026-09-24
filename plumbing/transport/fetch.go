@@ -23,15 +23,15 @@ func FetchPack(
 ) error {
 	packf = ioutil.NewContextReadCloser(ctx, packf)
 
-	var demuxer *sideband.Demuxer
+	// NegotiatePack requests sideband whenever caps offers it, so the pack
+	// arrives framed even when the caller wants no progress output.
 	var reader io.Reader = packf
 	if caps.Supports(capability.Sideband64k) {
-		demuxer = sideband.NewDemuxer(sideband.Sideband64k, reader)
+		demuxer := sideband.NewDemuxer(sideband.Sideband64k, packf)
+		demuxer.Progress = req.Progress
+		reader = demuxer
 	} else if caps.Supports(capability.Sideband) {
-		demuxer = sideband.NewDemuxer(sideband.Sideband, reader)
-	}
-
-	if demuxer != nil && req.Progress != nil {
+		demuxer := sideband.NewDemuxer(sideband.Sideband, packf)
 		demuxer.Progress = req.Progress
 		reader = demuxer
 	}

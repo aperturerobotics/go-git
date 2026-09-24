@@ -92,13 +92,14 @@ func NegotiatePack(
 		upreq.Capabilities.Set(capability.MultiACK)
 	}
 
-	if req.Progress != nil {
-		if caps.Supports(capability.Sideband64k) {
-			upreq.Capabilities.Set(capability.Sideband64k)
-		} else if caps.Supports(capability.Sideband) {
-			upreq.Capabilities.Set(capability.Sideband)
-		}
-	} else if caps.Supports(capability.NoProgress) {
+	// Like git fetch-pack, request sideband whenever the server offers it so
+	// FetchPack can always demultiplex it; a quiet fetch adds no-progress.
+	if caps.Supports(capability.Sideband64k) {
+		upreq.Capabilities.Set(capability.Sideband64k)
+	} else if caps.Supports(capability.Sideband) {
+		upreq.Capabilities.Set(capability.Sideband)
+	}
+	if req.Progress == nil && caps.Supports(capability.NoProgress) {
 		upreq.Capabilities.Set(capability.NoProgress)
 	}
 
