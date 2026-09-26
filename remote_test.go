@@ -661,6 +661,15 @@ func (s *RemoteSuite) testFetchFastForward(sto storage.Storer) {
 	})
 	s.ErrorIs(err, ErrForceNeeded)
 
+	// Skipping tags must not skip the fast-forward check.
+	err = r.Fetch(&FetchOptions{
+		RefSpecs: []config.RefSpec{
+			config.RefSpec("refs/heads/branch:refs/heads/master"),
+		},
+		Tags: NoTags,
+	})
+	s.ErrorIs(err, ErrForceNeeded)
+
 	// And that forcing it fixes the problem.
 	err = r.Fetch(&FetchOptions{
 		RefSpecs: []config.RefSpec{

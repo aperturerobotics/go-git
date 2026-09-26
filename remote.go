@@ -1504,24 +1504,21 @@ func (r *Remote) updateLocalReferenceStorage(
 		}
 	}
 
-	if tagMode == plumbing.NoTags {
-		return updated, nil
-	}
-
-	tags := fetchedRefs
-	if isWildcard {
-		tags = remoteRefs
-	}
-	tagUpdated, tagForceNeeded, err := r.buildFetchedTags(tags, tagMode == plumbing.AllTags, force)
-	if err != nil {
-		return updated, err
-	}
-
-	if tagUpdated {
-		updated = true
-	}
-	if tagForceNeeded {
-		forceNeeded = true
+	if tagMode != plumbing.NoTags {
+		tags := fetchedRefs
+		if isWildcard {
+			tags = remoteRefs
+		}
+		tagUpdated, tagForceNeeded, err := r.buildFetchedTags(tags, tagMode == plumbing.AllTags, force)
+		if err != nil {
+			return updated, err
+		}
+		if tagUpdated {
+			updated = true
+		}
+		if tagForceNeeded {
+			forceNeeded = true
+		}
 	}
 
 	if forceNeeded {
