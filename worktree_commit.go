@@ -10,14 +10,12 @@ import (
 	"time"
 
 	"github.com/go-git/go-billy/v6"
-
 	"github.com/go-git/go-git/v6/config"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/filemode"
 	"github.com/go-git/go-git/v6/plumbing/format/index"
 	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/go-git/go-git/v6/storage"
-	"github.com/go-git/go-git/v6/utils/merkletrie"
 	"github.com/go-git/go-git/v6/utils/trace"
 	"github.com/go-git/go-git/v6/x/plugin"
 )
@@ -26,17 +24,18 @@ var (
 	// ErrEmptyCommit occurs when a commit is attempted using a clean
 	// working tree, with no changes to be committed.
 	ErrEmptyCommit = errors.New("cannot create empty commit: clean working tree")
-	// ErrCannotCherryPickWithoutCommitOptions happens when no commitOptions is not provided for cherry-picking commit
+	// ErrCannotCherryPickWithoutCommitOptions indicates missing cherry-pick options.
 	ErrCannotCherryPickWithoutCommitOptions = errors.New("cannot cherry-pick without commit options")
 
-	// characters to be removed from user name and/or email before using them to build a commit object
-	// See https://git-scm.com/docs/git-commit#_commit_information
+	// invalidCharactersRe strips characters prohibited in commit identities.
+	// See https://git-scm.com/docs/git-commit#_commit_information.
 	invalidCharactersRe = regexp.MustCompile(`[<>\n]`)
 )
 
 // Commit stores the current contents of the index in a new commit along with
 // a log message from the user describing the changes.
 func (w *Worktree) Commit(msg string, opts *CommitOptions) (plumbing.Hash, error) {
+	// Measure commit latency when performance tracing is enabled.
 	if trace.Performance.Enabled() {
 		start := time.Now()
 		defer func() {
@@ -44,16 +43,19 @@ func (w *Worktree) Commit(msg string, opts *CommitOptions) (plumbing.Hash, error
 		}()
 	}
 
+	// Resolve commit options and parent defaults before staging changes.
 	if err := opts.Validate(w.r); err != nil {
 		return plumbing.ZeroHash, err
 	}
 
+	// Stage modifications and deletions requested by the caller.
 	if opts.All {
 		if err := w.autoAddModifiedAndDeleted(); err != nil {
 			return plumbing.ZeroHash, err
 		}
 	}
 
+	// Preserve the existing parent list when replacing the HEAD commit.
 	if opts.Amend {
 		head, err := w.r.Head()
 		if err != nil {
@@ -64,29 +66,34 @@ func (w *Worktree) Commit(msg string, opts *CommitOptions) (plumbing.Hash, error
 			return plumbing.ZeroHash, err
 		}
 
+		// Reuse the amended commit's ancestry.
 		opts.Parents = headCommit.ParentHashes
 	}
 
+	// Read the staged entries that define the new tree.
 	idx, err := w.r.Storer.Index()
 	if err != nil {
 		return plumbing.ZeroHash, err
 	}
 
-	// First handle the case of the first commit in the repository being empty.
+	// Reject an empty initial tree unless empty commits are enabled.
 	if len(opts.Parents) == 0 && len(idx.Entries) == 0 && !opts.AllowEmptyCommits {
 		return plumbing.ZeroHash, ErrEmptyCommit
 	}
 
+	// Build the tree from the index's blob hashes and file modes.
 	h := &buildTreeHelper{
 		fs: w.filesystem,
 		s:  w.r.Storer,
 	}
 
+	// Persist the complete index tree before comparing it with the parent.
 	treeHash, err := h.BuildTree(idx, opts)
 	if err != nil {
 		return plumbing.ZeroHash, err
 	}
 
+	// Compare with the first parent to detect an unchanged tree.
 	previousTree := plumbing.ZeroHash
 	if len(opts.Parents) > 0 {
 		parentCommit, err := w.r.CommitObject(opts.Parents[0])
@@ -96,157 +103,79 @@ func (w *Worktree) Commit(msg string, opts *CommitOptions) (plumbing.Hash, error
 		previousTree = parentCommit.TreeHash
 	}
 
+	// Reject an unchanged tree unless empty commits are enabled.
 	if treeHash == previousTree && !opts.AllowEmptyCommits {
 		return plumbing.ZeroHash, ErrEmptyCommit
 	}
 
+	// Store the new commit before publishing it through HEAD.
 	commit, err := w.buildCommitObject(msg, opts, treeHash)
 	if err != nil {
 		return plumbing.ZeroHash, err
 	}
 
+	// Advance the branch or detached HEAD to the stored commit.
 	return commit, w.updateHEAD(commit)
 }
 
-// CherryPick cherry picks commits and merge them into the worktree based on the selected
-// merge strategy. Each commit sits on the top of worktree's current head.
-// It resembles `git cherry-pick <commit-hash-1> <commit-hash-2> ... --strategy-option [theirs,ours]`
-func (w *Worktree) CherryPick(commitOpts *CommitOptions, ortStrategyOption OrtMergeStrategyOption, commits ...*object.Commit) error {
-	if commitOpts == nil {
-		return ErrCannotCherryPickWithoutCommitOptions
-	}
-
-	cfg, err := w.r.Config()
-	if err != nil {
-		return err
-	}
-
-	// Materialise changes through the same validating filesystem and
-	// checkout path as reset/checkout, so cherry-pick shares their
-	// leading-symlink handling, mode awareness (symlinks, exec bits,
-	// CRLF) and root reuse instead of writing raw bytes via Create.
-	fs, closeFS := w.reusableRootFS()
-	defer closeFS()
-
-	for _, commit := range commits {
-		var changes object.Changes
-		headRef, err := w.r.Head()
-		if err != nil {
-			return err
-		}
-		headCommit, err := w.r.CommitObject(headRef.Hash())
-		if err != nil {
-			return err
-		}
-		currentTree, err := headCommit.Tree()
-		if err != nil {
-			return err
-		}
-
-		commitTree, err := commit.Tree()
-		if err != nil {
-			return err
-		}
-
-		switch ortStrategyOption {
-		case TheirsMergeStrategy:
-			changes, err = currentTree.Diff(commitTree)
-		case OursMergeStrategy:
-			changes, err = commitTree.Diff(currentTree)
-		}
-
-		if err != nil {
-			return err
-		}
-		for _, change := range changes {
-			action, err := change.Action()
-			if err != nil {
-				return err
-			}
-
-			switch action {
-			case merkletrie.Delete:
-				if _, err := w.Remove(change.From.Name); err != nil {
-					return err
-				}
-			case merkletrie.Insert, merkletrie.Modify:
-				_, to, err := change.Files()
-				if err != nil {
-					return err
-				}
-				if to == nil {
-					continue
-				}
-				// change.Files names the *File after the tree leaf. The
-				// worktree write needs the full path so it lands at the
-				// right location and is validated by the wrapper.
-				to.Name = change.To.Name
-				if err := w.checkoutFile(cfg, fs, to); err != nil {
-					return err
-				}
-				if _, err := w.Add(to.Name); err != nil {
-					return err
-				}
-			}
-		}
-		_, err = w.Commit(commit.Message, &CommitOptions{
-			Author:            &commit.Author,
-			Committer:         commitOpts.Committer,
-			Signer:            commitOpts.Signer,
-			AllowEmptyCommits: commitOpts.AllowEmptyCommits,
-		})
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
+// autoAddModifiedAndDeleted stages tracked modifications and deletions.
 func (w *Worktree) autoAddModifiedAndDeleted() error {
+	// Load staging configuration before comparing the index and worktree.
 	cfg, err := w.r.Config()
 	if err != nil {
 		return err
 	}
 
+	// Inspect tracked changes in the filesystem.
 	s, err := w.Status()
 	if err != nil {
 		return err
 	}
 
+	// Load the index that will receive all tracked worktree changes.
 	idx, err := w.r.Storer.Index()
 	if err != nil {
 		return err
 	}
 
+	// Stage only tracked modifications and deletions.
 	for path, fs := range s {
 		if fs.Worktree != Modified && fs.Worktree != Deleted {
 			continue
 		}
 
+		// Apply the tracked path's new state to the index.
 		if _, _, err := w.doAddFile(cfg, idx, s, path, nil); err != nil {
 			return err
 		}
 	}
 
+	// Publish the updated index once every tracked change is staged.
 	return w.r.Storer.SetIndex(idx)
 }
 
+// updateHEAD advances the current branch or detached HEAD to commit.
 func (w *Worktree) updateHEAD(commit plumbing.Hash) error {
+	// Determine whether HEAD is detached or points to a branch.
 	head, err := w.r.Storer.Reference(plumbing.HEAD)
 	if err != nil {
 		return err
 	}
 
+	// Update the branch target for a symbolic HEAD.
 	name := plumbing.HEAD
 	if head.Type() != plumbing.HashReference {
 		name = head.Target()
 	}
 
+	// Publish the new commit through the selected reference.
 	ref := plumbing.NewHashReference(name, commit)
 	return w.r.Storer.SetReference(ref)
 }
 
+// buildCommitObject stores a commit with sanitized identities and an optional signature.
 func (w *Worktree) buildCommitObject(msg string, opts *CommitOptions, tree plumbing.Hash) (plumbing.Hash, error) {
+	// Assemble the commit record from the tree and resolved options.
 	commit := &object.Commit{
 		Author:       w.sanitize(*opts.Author),
 		Committer:    w.sanitize(*opts.Committer),
@@ -255,6 +184,7 @@ func (w *Worktree) buildCommitObject(msg string, opts *CommitOptions, tree plumb
 		ParentHashes: opts.Parents,
 	}
 
+	// Resolve the configured signer when no explicit signer was supplied.
 	signer := opts.Signer
 	if signer == nil {
 		cfg, err := w.r.ConfigScoped(config.SystemScope)
@@ -265,6 +195,7 @@ func (w *Worktree) buildCommitObject(msg string, opts *CommitOptions, tree plumb
 				return plumbing.ZeroHash, fmt.Errorf("cannot auto-sign commit: disable commit.gpgSign or register an ObjectSigner plugin")
 			}
 
+			// Acquire the registered signer after confirming its availability.
 			signer, err = plugin.Get(plugin.ObjectSigner())
 			if err != nil {
 				return plumbing.ZeroHash, fmt.Errorf("get object signer: %w", err)
@@ -272,6 +203,7 @@ func (w *Worktree) buildCommitObject(msg string, opts *CommitOptions, tree plumb
 		}
 	}
 
+	// Attach the signature before encoding the final commit object.
 	if signer != nil {
 		sig, err := signObject(signer, commit)
 		if err != nil {
@@ -280,6 +212,7 @@ func (w *Worktree) buildCommitObject(msg string, opts *CommitOptions, tree plumb
 		commit.Signature = string(sig)
 	}
 
+	// Persist the complete commit in the repository object store.
 	obj := w.r.Storer.NewEncodedObject()
 	if err := commit.Encode(obj); err != nil {
 		return plumbing.ZeroHash, err
@@ -287,6 +220,7 @@ func (w *Worktree) buildCommitObject(msg string, opts *CommitOptions, tree plumb
 	return w.r.Storer.SetEncodedObject(obj)
 }
 
+// sanitize removes characters Git prohibits in commit author and committer identities.
 func (w *Worktree) sanitize(signature object.Signature) object.Signature {
 	return object.Signature{
 		Name:  invalidCharactersRe.ReplaceAllString(signature.Name, ""),
@@ -299,31 +233,38 @@ func (w *Worktree) sanitize(signature object.Signature) object.Signature {
 // reading the blobs from the given filesystem and creating the trees from the
 // index structure. The created objects are pushed to a given Storer.
 type buildTreeHelper struct {
+	// fs is the worktree filesystem used by the commit builder.
 	fs billy.Filesystem
-	s  storage.Storer
+	// s receives the encoded tree objects.
+	s storage.Storer
 
-	trees   map[string]*object.Tree
+	// trees holds the tree under construction for each directory path.
+	trees map[string]*object.Tree
+	// entries tracks paths already represented as entries.
 	entries map[string]*object.TreeEntry
 }
 
-// BuildTree builds the tree objects and push its to the storer, the hash
-// of the root tree is returned.
+// BuildTree stores the index tree and returns its root hash.
 func (h *buildTreeHelper) BuildTree(idx *index.Index, _ *CommitOptions) (plumbing.Hash, error) {
+	// Initialize the root and path maps for this index.
 	const rootNode = ""
 	h.trees = map[string]*object.Tree{rootNode: {}}
 	h.entries = map[string]*object.TreeEntry{}
 
+	// Attach every indexed file to its directory tree.
 	for _, e := range idx.Entries {
 		if err := h.commitIndexEntry(e); err != nil {
 			return plumbing.ZeroHash, err
 		}
 	}
 
+	// Persist descendants before encoding the root tree.
 	return h.copyTreeToStorageRecursive(rootNode, h.trees[rootNode])
 }
 
+// commitIndexEntry attaches one indexed path and its parent directories.
 func (h *buildTreeHelper) commitIndexEntry(e *index.Entry) error {
-	// Index entries with a zero hash point at no object — Tree.Encode
+	// Index entries with a zero hash point at no object. Tree.Encode
 	// (through Tree.Validate) refuses to write them, and the pre-fsck
 	// behavior of #1773 was to accept the entry but never reach a
 	// healthy tree. Skip them here so the resulting tree is well-formed.
@@ -331,30 +272,39 @@ func (h *buildTreeHelper) commitIndexEntry(e *index.Entry) error {
 		return nil
 	}
 
+	// Split the repository-relative path into directory and leaf components.
 	parts := strings.Split(e.Name, "/")
 
+	// Build each missing directory and the final indexed leaf.
 	var fullpath string
 	for _, part := range parts {
 		parent := fullpath
 		fullpath = path.Join(fullpath, part)
 
+		// Attach the component to its parent tree.
 		h.doBuildTree(e, parent, fullpath)
 	}
 
+	// Finish after the full indexed path is represented.
 	return nil
 }
 
+// doBuildTree adds one missing directory or leaf to its parent tree.
 func (h *buildTreeHelper) doBuildTree(e *index.Entry, parent, fullpath string) {
+	// Reuse a directory tree already built for another indexed path.
 	if _, ok := h.trees[fullpath]; ok {
 		return
 	}
 
+	// Reuse a leaf entry already represented at this path.
 	if _, ok := h.entries[fullpath]; ok {
 		return
 	}
 
+	// Construct a tree entry for either the indexed leaf or its directory.
 	te := object.TreeEntry{Name: path.Base(fullpath)}
 
+	// Assign the leaf's blob and mode, or allocate its directory tree.
 	if fullpath == e.Name {
 		te.Mode = e.Mode
 		te.Hash = e.Hash
@@ -363,44 +313,60 @@ func (h *buildTreeHelper) doBuildTree(e *index.Entry, parent, fullpath string) {
 		h.trees[fullpath] = &object.Tree{}
 	}
 
+	// Attach the new entry to its parent directory.
 	h.trees[parent].Entries = append(h.trees[parent].Entries, te)
 }
 
+// sortableEntries orders tree entries using Git's directory suffix rule.
 type sortableEntries []object.TreeEntry
 
+// sortName includes the trailing slash that Git uses when ordering directories.
 func (sortableEntries) sortName(te object.TreeEntry) string {
 	if te.Mode == filemode.Dir {
 		return te.Name + "/"
 	}
 	return te.Name
 }
-func (se sortableEntries) Len() int           { return len(se) }
-func (se sortableEntries) Less(i, j int) bool { return se.sortName(se[i]) < se.sortName(se[j]) }
-func (se sortableEntries) Swap(i, j int)      { se[i], se[j] = se[j], se[i] }
 
+// Len returns the number of entries.
+func (se sortableEntries) Len() int { return len(se) }
+
+// Less compares entries in Git tree order.
+func (se sortableEntries) Less(i, j int) bool { return se.sortName(se[i]) < se.sortName(se[j]) }
+
+// Swap exchanges two entries during sorting.
+func (se sortableEntries) Swap(i, j int) { se[i], se[j] = se[j], se[i] }
+
+// copyTreeToStorageRecursive stores descendants and returns the encoded tree hash.
 func (h *buildTreeHelper) copyTreeToStorageRecursive(parent string, t *object.Tree) (plumbing.Hash, error) {
+	// Sort entries in Git tree order before encoding descendants.
 	sort.Sort(sortableEntries(t.Entries))
 	for i, e := range t.Entries {
 		if e.Mode != filemode.Dir {
 			continue
 		}
 
+		// Store the child tree before recording its hash in the parent.
 		path := path.Join(parent, e.Name)
 
+		// Resolve the child hash through the same recursive store.
 		var err error
 		e.Hash, err = h.copyTreeToStorageRecursive(path, h.trees[path])
 		if err != nil {
 			return plumbing.ZeroHash, err
 		}
 
+		// Publish the stored child hash into its parent entry.
 		t.Entries[i] = e
 	}
 
+	// Encode the parent with its complete set of child hashes.
 	o := h.s.NewEncodedObject()
 	if err := t.Encode(o); err != nil {
 		return plumbing.ZeroHash, err
 	}
 
+	// Reuse a stored tree with identical bytes, or store the new object.
 	hash := o.Hash()
 	if h.s.HasEncodedObject(hash) == nil {
 		return hash, nil
